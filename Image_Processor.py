@@ -78,6 +78,69 @@ def tepi_arah(image):
     arah = (arah + np.pi) / (2 * np.pi) * 255
     return Image.fromarray(arah.astype(np.uint8))
 
+def sketsa_jagged(image, threshold=40, noise_level=25, seed=42):
+    """
+    Versi sketsa yang lebih 'jagged' / kasar dibanding sketsa asli (hpf0 + invert).
+    Bedanya: peta tepi diberi noise acak lalu di-threshold keras (binarize),
+    jadi tepinya pecah-pecah / bergerigi, bukan gradasi halus seperti sketsa biasa.
+    `image` harus berupa array grayscale (misalnya hasil np.array(grayscale_image_invert)).
+    """
+    edge_map = hpf0(image).astype(np.int16)
+
+    rng = np.random.default_rng(seed)
+    noise = rng.integers(-noise_level, noise_level + 1, size=edge_map.shape)
+    noisy_edge = np.clip(edge_map + noise, 0, 255)
+
+    # Hard threshold (bukan gradasi halus) -> hasil jadi bergerigi/kasar
+    jagged = np.where(noisy_edge > threshold, 0, 255).astype(np.uint8)
+    return Image.fromarray(jagged)
+
+def hex_to_rgb(hex_color):
+    hex_color = hex_color.lstrip("#")
+    return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+
+def shift_mask(mask, dy, dx):
+    """Geser array boolean 2D sebanyak (dy, dx) piksel, sisanya diisi False."""
+    h, w = mask.shape
+    shifted = np.zeros_like(mask)
+
+    y_src_start, y_src_end = max(0, -dy), min(h, h - dy)
+    x_src_start, x_src_end = max(0, -dx), min(w, w - dx)
+    y_dst_start = max(0, dy)
+    x_dst_start = max(0, dx)
+    y_dst_end = y_dst_start + (y_src_end - y_src_start)
+    x_dst_end = x_dst_start + (x_src_end - x_src_start)
+
+    if y_src_end > y_src_start and x_src_end > x_src_start:
+        shifted[y_dst_start:y_dst_end, x_dst_start:x_dst_end] = mask[y_src_start:y_src_end, x_src_start:x_src_end]
+    return shifted
+
+def neon_edge(image, color1=(255, 0, 255), color2=(0, 255, 255), offset=3,
+              axis="Left-Right", threshold=40):
+    """
+    Garis tepi asli TETAP ada (digambar putih di paling atas, tidak dihapus).
+    Ditambahkan 2 salinan garis berwarna yang digeser ke kiri & kanan
+    (atau atas & bawah), sehingga terlihat seperti highlight neon di sisi garis.
+    """
+    edge_gray = hpf0(image)
+    mask = edge_gray > threshold
+
+    h, w = mask.shape
+    canvas = np.zeros((h, w, 3), dtype=np.uint8)
+
+    if axis == "Left-Right":
+        mask1 = shift_mask(mask, 0, -offset)
+        mask2 = shift_mask(mask, 0, offset)
+    else:  # "Top-Bottom"
+        mask1 = shift_mask(mask, -offset, 0)
+        mask2 = shift_mask(mask, offset, 0)
+
+    canvas[mask1] = color1
+    canvas[mask2] = color2
+    canvas[mask] = (255, 255, 255)  # original line, drawn last so it stays intact/on top
+
+    return Image.fromarray(canvas)
+
 def resize_aspect(image, ratio):
     if ratio == "Original":
         return image
@@ -137,12 +200,42 @@ if uploaded_file:
     # --- SEPARATOR ---
     st.sidebar.divider()
 
+    jagged_threshold = st.sidebar.slider("Sketsa Jagged Threshold", 0, 150, 40, step=5, key="jagged_threshold")
+    jagged_noise = st.sidebar.slider("Sketsa Jagged Roughness", 0, 80, 25, step=5, key="jagged_noise")
+
+    # --- SEPARATOR ---
+    st.sidebar.divider()
+
+    st.sidebar.subheader("🎨 Neon Edge")
+    neon_color1_hex = st.sidebar.color_picker("Neon Color 1", "#ff00ff", key="neon_color1")
+    neon_color2_hex = st.sidebar.color_picker("Neon Color 2", "#00ffff", key="neon_color2")
+    neon_axis = st.sidebar.selectbox("Neon Offset Direction", ["Left-Right", "Top-Bottom"], key="neon_axis")
+    neon_offset = st.sidebar.slider("Neon Offset (px)", 1, 15, 3, step=1, key="neon_offset")
+    neon_threshold = st.sidebar.slider("Neon Edge Threshold", 0, 150, 40, step=5, key="neon_threshold")
+
     # Generate derived images
     grayscale_image = to_grayscale(image_resized)
     grayscale_image_invert = to_grayscale(inverted_image)
 
     sketsa_image_hpf = hpf0(np.array(grayscale_image_invert))
     sketsa_image = invert_colors(sketsa_image_hpf)
+
+    # New rougher/jagged sketch variant (original smooth sketsa above is untouched)
+    sketsa_jagged_image = sketsa_jagged(
+        np.array(grayscale_image),
+        threshold=jagged_threshold,
+        noise_level=jagged_noise,
+    )
+
+    # New neon-highlight edge variant: original line stays, 2 colored offset lines added
+    neon_edge_image = neon_edge(
+        np.array(grayscale_image),
+        color1=hex_to_rgb(neon_color1_hex),
+        color2=hex_to_rgb(neon_color2_hex),
+        offset=neon_offset,
+        axis=neon_axis,
+        threshold=neon_threshold,
+    )
 
     relief_image_hpf = hpf1(np.array(grayscale_image))
 
@@ -159,6 +252,8 @@ if uploaded_file:
         {"name": "Grayscale Inverted Image", "image": grayscale_image_invert},
         {"name": "Sketsa Image (HPF0)", "image": sketsa_image_hpf},
         {"name": "Sketsa Image (Invert)", "image": sketsa_image},
+        {"name": "Sketsa Image (Jagged)", "image": sketsa_jagged_image},
+        {"name": "Neon Edge Image", "image": neon_edge_image},
         {"name": "Relief Image (HPF1)", "image": relief_image_hpf},
         {"name": "Tepi Titik Image", "image": tepi_image_titik},
         {"name": "Tepi Garis Image", "image": tepi_image_garis},
